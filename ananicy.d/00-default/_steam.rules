@@ -4,6 +4,9 @@
 # Steam integrated web browser
 { "name": "steamwebhelper", "type": "BG_CPUIO" }
 
+# Proton GE
+{ "cmdline": "/usr/share/steam/compatibilitytools.d/proton-ge-custom/proton", "type": "Game"}
+
 # https://store.steampowered.com/app/730
 { "name": "csgo_linux64", "type": "Game"}
  # http://store.steampowered.com/app/355180

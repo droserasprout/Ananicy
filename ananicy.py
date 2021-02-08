@@ -234,7 +234,8 @@ class Ananicy:
         self.config_dir = config_dir
         self.cgroups = {}
         self.types = {}
-        self.rules = {}
+        self.rules_by_name = {}
+        self.rules_by_cmdline = {}
         self.proc = {}
         self.check_freq = 5
         self.verbose = {
@@ -447,8 +448,14 @@ class Ananicy:
 
         line = json.loads(line, parse_int=int)
         name = line.get("name")
-        if name == "":
-            raise Failure('Missing "name": ')
+        cmdline = line.get("cmdline")
+
+        if name:
+            key, rules_mapping = name, self.rules_by_name
+        elif cmdline:
+            key, rules_mapping = cmdline, self.rules_by_cmdline
+        else:
+            raise Failure('Missing "name" or "cmdline: ')
 
         _type = line.get("type")
         if _type:
@@ -467,7 +474,7 @@ class Ananicy:
         if not self.cgroups.get(cgroup):
             cgroup = None
 
-        self.rules[name] = {
+        rules_mapping[key] = {
             "nice": self.__check_nice(line.get("nice")),
             "ioclass": line.get("ioclass"),
             "ionice": self.__check_ionice(line.get("ionice")),
@@ -497,7 +504,7 @@ class Ananicy:
                             file, line_number, e)
                         print(out, flush=True)
 
-        if not self.rules:
+        if not (self.rules_by_name or self.rules_by_cmdline):
             raise Failure("No rules loaded")
 
     def dir_must_exits(self, path):
@@ -582,24 +589,20 @@ class Ananicy:
              str(pid)],
             stdout=subprocess.DEVNULL)
 
-    def renice(self, tpid: int, nice: int, name: str):
+    def renice(self, tpid: int, nice: int):
         p_tpid = self.proc[tpid]
         c_nice = p_tpid.nice
-        if not name:
-            name = p_tpid.cmd
         if c_nice == nice:
             return
         os.setpriority(os.PRIO_PROCESS, tpid, nice)
         self.renice_cmd(tpid, nice)
-        msg = "renice: {}[{}/{}] {} -> {}".format(name, p_tpid.pid, tpid,
+        msg = "renice: {}[{}/{}] {} -> {}".format(p_tpid.cmd, p_tpid.pid, tpid,
                                                   c_nice, nice)
         if self.verbose["apply_nice"]:
             print(msg, flush=True)
 
-    def ionice(self, tpid, ioclass, ionice, name: str):
+    def ionice(self, tpid, ioclass, ionice):
         p_tpid = self.proc[tpid]
-        if not name:
-            name = p_tpid.cmd
         args = []
         msg_ioclass = False
         msg_ionice = False
@@ -660,13 +663,11 @@ class Ananicy:
         cmd += [str(pid)]
         subprocess.run(cmd, stdout=subprocess.DEVNULL)
 
-    def sched(self, tpid, sched, rtprio, name):
+    def sched(self, tpid, sched, rtprio):
         p_tpid = self.proc[tpid]
         l_prio = None
         c_sched = p_tpid.sched
         c_rtprio = p_tpid.rtprio
-        if not name:
-            name = p_tpid.cmd
         if not c_sched or (c_sched == sched
                            and (rtprio is None or c_rtprio == rtprio)):
             return
@@ -680,16 +681,15 @@ class Ananicy:
         if self.verbose["apply_sched"]:
             print(msg)
 
-    def apply_rule(self, tpid, rule, rule_name):
+    def apply_rule(self, tpid, rule):
         if rule.get("nice"):
-            self.renice(tpid, rule["nice"], rule_name)
+            self.renice(tpid, rule["nice"])
         if rule.get("ioclass") or rule.get("ionice"):
-            self.ionice(tpid, rule.get("ioclass"), rule.get("ionice"),
-                        rule_name)
+            self.ionice(tpid, rule.get("ioclass"), rule.get("ionice"))
         if rule.get("sched"):
-            self.sched(tpid, rule["sched"], rule["rtprio"], rule_name)
+            self.sched(tpid, rule["sched"], rule["rtprio"])
         if rule.get("oom_score_adj"):
-            self.oom_score_adj(tpid, rule["oom_score_adj"], rule_name)
+            self.oom_score_adj(tpid, rule["oom_score_adj"])
 
         cgroup = rule.get("cgroup")
         if not cgroup:
@@ -698,8 +698,9 @@ class Ananicy:
         cgroup_ctrl = self.cgroups[cgroup]
         if not cgroup_ctrl.pid_in_cgroup(tpid):
             cgroup_ctrl.add_pid(tpid)
+            p_tpid = self.proc[tpid]
             msg = "Cgroup: {}[{}] added to {}".format(
-                rule_name, tpid, cgroup_ctrl.name)
+                p_tpid.cmd, tpid, cgroup_ctrl.name)
             if self.verbose["apply_cgroup"]:
                 print(msg)
 
@@ -709,16 +710,20 @@ class Ananicy:
         if not os.path.exists("/proc/{}/task/{}".format(pe.pid, pe.tpid)):
             return
 
-        rule_name = pe.cmd
-        rule = self.rules.get(rule_name)
+        rule_cmdline = pe.cmdline
+        rule = self.rules_by_name.get(pe.cmd)
         if not rule:
-            rule_name = pe.stat_name
-            rule = self.rules.get(rule_name)
+            rule = self.rules_by_name.get(pe.stat_name)
+        if not rule:
+            for cmdline_part in pe.cmdline:
+                rule = self.rules_by_cmdline.get(cmdline_part)
+                if rule:
+                    break
         if not rule:
             return
 
         try:
-            self.apply_rule(tpid, rule, rule_name)
+            self.apply_rule(tpid, rule)
         except subprocess.CalledProcessError:
             return
         except FileNotFoundError:
@@ -744,7 +749,7 @@ class Ananicy:
         print(json.dumps(cgroups_dict, indent=4), flush=True)
 
     def dump_rules(self):
-        print(json.dumps(self.rules, indent=4), flush=True)
+        print(json.dumps(self.rules_by_name, indent=4), flush=True)
 
     def dump_proc(self):
         self.proc_map_update()
